@@ -317,13 +317,21 @@ public extension DeveloperPortal {
         request.httpMethod = "POST"
         request.httpBody = plistData
 
-        let headers: [String: String] = [
+        var headers: [String: String] = [
             "Content-Type": "text/x-xml-plist",
             "X-MMe-Client-Info": anisetteData.clientInfo,
             "Accept": "*/*",
             "User-Agent": h.grandSlam.userAgent,
             "Connection": "close"
         ]
+        if !Self.isMacClientInfo(anisetteData.clientInfo) {
+            // GSA answers 503 when a non-Mac client info comes with the Xcode-on-Mac user agent;
+            // send the user agent of the device the anisette data belongs to (as isideload does).
+            headers["User-Agent"] = anisetteData.userAgent
+            headers["Accept"] = "text/x-xml-plist"
+            headers["X-Xcode-Version"] = "27.0 (27A5218g)"
+            headers["X-Apple-App-Info"] = h.grandSlam.authApp
+        }
         headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
 
         if let allHeaders = request.allHTTPHeaderFields {
@@ -904,7 +912,7 @@ public extension DeveloperPortal {
             "Accept": "application/x-buddyml",
             "Accept-Language": "en-us",
             "Content-Type": "application/x-plist",
-            "User-Agent": h.developerServices.userAgent,
+            "User-Agent": Self.isMacClientInfo(a.clientInfo) ? h.developerServices.userAgent : a.userAgent,
             "X-Apple-App-Info": h.grandSlam.authApp,
             "X-Xcode-Version": context.xcodeVersion,
             "X-Apple-Identity-Token": encodedIdentityToken,
@@ -922,6 +930,10 @@ public extension DeveloperPortal {
         ]
         headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
         return request
+    }
+
+    static func isMacClientInfo(_ clientInfo: String) -> Bool {
+        clientInfo.contains("<macOS;") || clientInfo.contains("Macintosh")
     }
 
     private func parsePlistOrJSON(_ data: Data) -> [String: any Sendable]? {
