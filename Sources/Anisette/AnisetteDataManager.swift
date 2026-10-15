@@ -433,27 +433,33 @@ public final class AnisetteDataManager: @unchecked Sendable {
             }
         }
 
-        var headers = headers
-        var userAgent = headers?.userAgent ?? Constants.Anisette.defaultUserAgent
-        // A remote v3 server provisions with its own device (Windows/Android ADI); Apple rejects
-        // the login (-80045) unless the client info we send matches that device, so ask the server.
+        // Apple's GSA rejects a login (-80045) when the client info does not match the device that
+        // produced the anisette data. Remote v3 servers say which device they are; on-device anisette
+        // runs Apple's Android libraries, so it has to present itself as Android.
+        var identity = ServerClientInfo.android
         if case .remote(let serverURL) = resolvedMode, let info = await Self.fetchServerClientInfo(serverURL) {
-            debugLog("[AnisetteDataManager] Using client info from \(serverURL.absoluteString): \(info.clientInfo)")
-            headers = (headers ?? AnisetteRequestHeaders()).with {
-                $0.clientInfo = info.clientInfo
-                $0.userAgent = info.userAgent
-            }
-            userAgent = info.userAgent
+            identity = info
         }
+        if let custom = headers?.clientInfo?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !custom.isEmpty, !Self.isStockMacClientInfo(custom), identity.isAndroid {
+            // A hand-entered, non-default client info wins over the Android fallback.
+            identity = ServerClientInfo(clientInfo: custom, userAgent: headers?.userAgent ?? identity.userAgent)
+        }
+        debugLog("[AnisetteDataManager] Client info for \(resolvedMode): \(identity.clientInfo) / \(identity.userAgent)")
+        let effectiveHeaders = (headers ?? AnisetteRequestHeaders()).with {
+            $0.clientInfo = identity.clientInfo
+            $0.userAgent = identity.userAgent
+        }
+        let userAgent = identity.userAgent
 
-        let clientInfo = headers?.clientInfo ?? Constants.Anisette.defaultClientInfo
+        let clientInfo = identity.clientInfo
         let client = try await getClient(for: resolvedMode, clientInfo: clientInfo, userAgent: userAgent)
 
         do {
             let (rawHeaders, newBlob) = try await client.getAnisetteData(
                 identifier: identifier,
                 storage: .memory(existingBlob: existingAdiBlob),
-                headers: headers
+                headers: effectiveHeaders
             )
 
             let anisetteData = try Self.validateAndCreateAnisetteData(from: rawHeaders)
@@ -487,10 +493,29 @@ public final class AnisetteDataManager: @unchecked Sendable {
         let clientInfo: String
         let userAgent: String
 
+        // Same identity as iloader 2.3.7 / isideload 0.4.5.
+        static let android = ServerClientInfo(
+            clientInfo: "<Pixel 7> <Android;14;UQ1A.240205.002> <com.apple.AuthKit/1 (com.apple.akd/1.0)>",
+            userAgent: "akd/1.0 CFNetwork/808.1.4"
+        )
+
+        var isAndroid: Bool { clientInfo == Self.android.clientInfo }
+
+        init(clientInfo: String, userAgent: String) {
+            self.clientInfo = clientInfo
+            self.userAgent = userAgent
+        }
+
         enum CodingKeys: String, CodingKey {
             case clientInfo = "client_info"
             case userAgent = "user_agent"
         }
+    }
+
+    /// The macOS identities SideStore/AnisetteKit shipped as defaults (and may have saved in settings).
+    private static func isStockMacClientInfo(_ clientInfo: String) -> Bool {
+        clientInfo == Constants.Anisette.defaultClientInfo
+            || clientInfo.contains("<macOS;")
     }
 
     private static func fetchServerClientInfo(_ serverURL: URL) async -> ServerClientInfo? {
@@ -523,7 +548,7 @@ public final class AnisetteDataManager: @unchecked Sendable {
             return try AnisetteClient(
                 provisioningDir: targetProvDir,
                 clientInfo: clientInfo,
-                userAgent: Constants.Anisette.defaultUserAgent,
+                userAgent: userAgent,
                 lookupURL: Constants.Anisette.URLs.grandSlamLookup,
                 requiredLibraries: Constants.Anisette.Libraries.requiredNames,
                 libraryDirectoryResolver: { libDir }
@@ -535,7 +560,7 @@ public final class AnisetteDataManager: @unchecked Sendable {
             if !AnisetteClient.validateLibrariesExist(at: libsDir, requiredLibraries: Constants.Anisette.Libraries.requiredNames) {
                 try await setupFromRemote(serverSourceURL: sourceURL, fallbackODAURL: fallbackURL, clientInfo: clientInfo)
             }
-            return try await ensureProviderLoaded(clientInfo: clientInfo)
+            return try await ensureProviderLoaded(clientInfo: clientInfo, userAgent: userAgent)
         }
     }
 
@@ -721,7 +746,7 @@ public final class AnisetteDataManager: @unchecked Sendable {
         try await downloadAndCacheLibs(from: odaInfo, targetDirectory: targetLibDir, clientInfo: clientInfo)
     }
 
-    public func ensureProviderLoaded(clientInfo: String = Constants.Anisette.defaultClientInfo) async throws -> AnisetteClient {
+    public func ensureProviderLoaded(clientInfo: String = Constants.Anisette.defaultClientInfo, userAgent: String = Constants.Anisette.defaultUserAgent) async throws -> AnisetteClient {
         if let existing = self.localProvider {
             return existing
         }
@@ -733,7 +758,7 @@ public final class AnisetteDataManager: @unchecked Sendable {
             let provider = try AnisetteClient(
                 provisioningDir: prov,
                 clientInfo: clientInfo,
-                userAgent: Constants.Anisette.defaultUserAgent,
+                userAgent: userAgent,
                 lookupURL: Constants.Anisette.URLs.grandSlamLookup,
                 requiredLibraries: Constants.Anisette.Libraries.requiredNames,
                 libraryDirectoryResolver: { libDir }
