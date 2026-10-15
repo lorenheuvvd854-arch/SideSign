@@ -433,8 +433,21 @@ public final class AnisetteDataManager: @unchecked Sendable {
             }
         }
 
+        var headers = headers
+        var userAgent = headers?.userAgent ?? Constants.Anisette.defaultUserAgent
+        // A remote v3 server provisions with its own device (Windows/Android ADI); Apple rejects
+        // the login (-80045) unless the client info we send matches that device, so ask the server.
+        if case .remote(let serverURL) = resolvedMode, let info = await Self.fetchServerClientInfo(serverURL) {
+            debugLog("[AnisetteDataManager] Using client info from \(serverURL.absoluteString): \(info.clientInfo)")
+            headers = (headers ?? AnisetteRequestHeaders()).with {
+                $0.clientInfo = info.clientInfo
+                $0.userAgent = info.userAgent
+            }
+            userAgent = info.userAgent
+        }
+
         let clientInfo = headers?.clientInfo ?? Constants.Anisette.defaultClientInfo
-        let client = try await getClient(for: resolvedMode, clientInfo: clientInfo)
+        let client = try await getClient(for: resolvedMode, clientInfo: clientInfo, userAgent: userAgent)
 
         do {
             let (rawHeaders, newBlob) = try await client.getAnisetteData(
@@ -470,14 +483,35 @@ public final class AnisetteDataManager: @unchecked Sendable {
         }
     }
 
-    private func getClient(for mode: AnisetteMode, clientInfo: String) async throws -> AnisetteClient {
+    private struct ServerClientInfo: Decodable {
+        let clientInfo: String
+        let userAgent: String
+
+        enum CodingKeys: String, CodingKey {
+            case clientInfo = "client_info"
+            case userAgent = "user_agent"
+        }
+    }
+
+    private static func fetchServerClientInfo(_ serverURL: URL) async -> ServerClientInfo? {
+        var request = URLRequest(url: serverURL.appendingPathComponent("v3/client_info"))
+        request.timeoutInterval = 10
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse, http.isSuccess,
+              let info = try? JSONDecoder().decode(ServerClientInfo.self, from: data),
+              !info.clientInfo.isEmpty, !info.userAgent.isEmpty
+        else { return nil }
+        return info
+    }
+
+    private func getClient(for mode: AnisetteMode, clientInfo: String, userAgent: String = Constants.Anisette.defaultUserAgent) async throws -> AnisetteClient {
         switch mode {
         case .remote(let server):
             try FileManager.default.createDirectory(at: provisioningDir, withIntermediateDirectories: true)
             return try AnisetteClient(
                 provisioningDir: provisioningDir,
                 clientInfo: clientInfo,
-                userAgent: Constants.Anisette.defaultUserAgent,
+                userAgent: userAgent,
                 lookupURL: Constants.Anisette.URLs.grandSlamLookup,
                 requiredLibraries: Constants.Anisette.Libraries.requiredNames,
                 provider: RemoteAnisetteDataProvider(serverURL: server)
