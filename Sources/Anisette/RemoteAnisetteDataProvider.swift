@@ -56,7 +56,8 @@ public struct RemoteAnisetteDataProvider: AnisetteDataProvider, Sendable {
         identifier: [UInt8],
         adiPb: [UInt8]
     ) async throws -> AnisetteDataResponse {
-        let cleanIdentifier = identifier.map { String(format: "%02x", $0) }.joined()
+        // anisette v3 servers take the 16-byte keychain identifier base64-encoded (as isideload/iloader send it)
+        let cleanIdentifier = Data(identifier).base64EncodedString()
         let baseURL = serverURL.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
 
         // 1. If adiPb is present, attempt v3 /v3/get_headers
@@ -105,6 +106,34 @@ public struct RemoteAnisetteDataProvider: AnisetteDataProvider, Sendable {
         return try AnisetteDataResponse(from: json)
     }
 
+    /// GSA asked for an anisette resync (hsc 434): ask the server for headers re-synced with Apple's SIM.
+    public func resyncHeaders(identifier: [UInt8], adiPb: Data, sim: String, deviceID: String, localUserID: String) async throws -> AnisetteDataResponse {
+        let baseURL = serverURL.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard let url = URL(string: "\(baseURL)/\(Constants.URLs.v3GetHeaders)") else { throw AnisetteError.invalidURL }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = Constants.Anisette.remoteRequestTimeout
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "identifier": Data(identifier).base64EncodedString(),
+            "adi_pb": adiPb.base64EncodedString(),
+            "sim": sim,
+            "device_id": deviceID,
+            "md_lu": localUserID
+        ])
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, http.isSuccess,
+              let json = try JSONSerialization.jsonObject(with: data) as? [String: String] else {
+            throw AnisetteError.badServerResponse(statusCode: (response as? HTTPURLResponse)?.statusCode ?? -1,
+                                                  payload: String(data: data, encoding: .utf8) ?? "")
+        }
+        if json["result"] == "GetHeadersError" {
+            throw AnisetteError.badServerResponse(statusCode: -1, payload: json["message"] ?? "GetHeadersError")
+        }
+        return try AnisetteDataResponse(from: json)
+    }
+
     public func startProvision(
         libDir: String,
         provisioningDir: String,
@@ -124,7 +153,8 @@ public struct RemoteAnisetteDataProvider: AnisetteDataProvider, Sendable {
         let webSocketTask = URLSession.shared.webSocketTask(with: webSocketURL)
         webSocketTask.resume()
 
-        let cleanIdentifier = identifier.map { String(format: "%02x", $0) }.joined()
+        // anisette v3 servers take the 16-byte keychain identifier base64-encoded (as isideload/iloader send it)
+        let cleanIdentifier = Data(identifier).base64EncodedString()
 
         do {
             while true {

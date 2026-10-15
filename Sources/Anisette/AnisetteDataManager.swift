@@ -443,9 +443,16 @@ public final class AnisetteDataManager: @unchecked Sendable {
             identity = info
         }
         debugLog("[AnisetteDataManager] Client info for \(resolvedMode): \(identity.clientInfo) / \(identity.userAgent)")
+        let isRemote: Bool = { if case .remote = resolvedMode { return true } else { return false } }()
         let effectiveHeaders = (headers ?? AnisetteRequestHeaders()).with {
             $0.clientInfo = identity.clientInfo
             $0.userAgent = identity.userAgent
+            if isRemote {
+                // Same derivation as isideload/iloader: device id and local user id both come from the
+                // keychain identifier the server provisioned, so Apple sees one consistent machine.
+                $0.deviceID = identifier.uuidString.lowercased()
+                $0.localUserID = Self.localUserID(for: identifier)
+            }
         }
         let userAgent = identity.userAgent
 
@@ -462,6 +469,21 @@ public final class AnisetteDataManager: @unchecked Sendable {
             let anisetteData = try Self.validateAndCreateAnisetteData(from: rawHeaders)
 
             if case .remote(let serverURL) = resolvedMode {
+                let adiBlob = newBlob ?? existingAdiBlob
+                DeveloperPortal.anisetteResyncHandler = { sim in
+                    guard let adiBlob else { throw AnisetteError.invalidAnisetteData }
+                    let fresh = try await RemoteAnisetteDataProvider(serverURL: serverURL).resyncHeaders(
+                        identifier: withUnsafeBytes(of: identifier.uuid) { Array($0) },
+                        adiPb: adiBlob,
+                        sim: sim,
+                        deviceID: anisetteData.deviceID,
+                        localUserID: anisetteData.localUserID
+                    )
+                    var resynced = anisetteData
+                    resynced.oneTimePassword = fresh.oneTimePassword
+                    resynced.machineID = fresh.machineID
+                    return resynced
+                }
                 remoteCache = RemoteAnisetteCacheEntry(
                     serverURL: serverURL,
                     identifier: identifier,
@@ -499,6 +521,11 @@ public final class AnisetteDataManager: @unchecked Sendable {
             case clientInfo = "client_info"
             case userAgent = "user_agent"
         }
+    }
+
+    /// X-Apple-I-MD-LU for remote v3 anisette: hex SHA-256 of the 16-byte keychain identifier.
+    static func localUserID(for identifier: UUID) -> String {
+        SHA256.hash(data: withUnsafeBytes(of: identifier.uuid) { Data($0) }).map { String(format: "%02x", $0) }.joined()
     }
 
     private static func fetchServerClientInfo(_ serverURL: URL) async -> ServerClientInfo? {

@@ -242,6 +242,14 @@ public final class DeveloperPortal: DeveloperPortalAPI, Sendable {
 
     public static let shared = DeveloperPortal()
 
+    /// Set by AnisetteDataManager for remote anisette: turns GSA's resync SIM (hsc 434) into fresh anisette data.
+    public static var anisetteResyncHandler: (@Sendable (String) async throws -> AnisetteData)? {
+        get { resyncLock.withLock { _anisetteResyncHandler } }
+        set { resyncLock.withLock { _anisetteResyncHandler = newValue } }
+    }
+    private static let resyncLock = NSLock()
+    private nonisolated(unsafe) static var _anisetteResyncHandler: (@Sendable (String) async throws -> AnisetteData)?
+
     public var customHeaders: SideSignHeaders {
         get { headersLock.withLock { cachedCustomHeaders } }
         set { headersLock.withLock { cachedCustomHeaders = newValue } }
