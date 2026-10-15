@@ -433,17 +433,14 @@ public final class AnisetteDataManager: @unchecked Sendable {
             }
         }
 
-        // Apple's GSA rejects a login (-80045) when the client info does not match the device that
-        // produced the anisette data. Remote v3 servers say which device they are; on-device anisette
-        // runs Apple's Android libraries, so it has to present itself as Android.
-        var identity = ServerClientInfo.android
+        // Apple's GSA rejects a login (-80045) when the client info does not match the device that produced
+        // the anisette data, so a remote v3 server's own identity (Windows ADI on jkcoxson's) is used as is.
+        var identity = ServerClientInfo(
+            clientInfo: headers?.clientInfo ?? Constants.Anisette.defaultClientInfo,
+            userAgent: headers?.userAgent ?? Constants.Anisette.defaultUserAgent
+        )
         if case .remote(let serverURL) = resolvedMode, let info = await Self.fetchServerClientInfo(serverURL) {
             identity = info
-        }
-        if let custom = headers?.clientInfo?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !custom.isEmpty, !Self.isStockMacClientInfo(custom), identity.isAndroid {
-            // A hand-entered, non-default client info wins over the Android fallback.
-            identity = ServerClientInfo(clientInfo: custom, userAgent: headers?.userAgent ?? identity.userAgent)
         }
         debugLog("[AnisetteDataManager] Client info for \(resolvedMode): \(identity.clientInfo) / \(identity.userAgent)")
         let effectiveHeaders = (headers ?? AnisetteRequestHeaders()).with {
@@ -493,14 +490,6 @@ public final class AnisetteDataManager: @unchecked Sendable {
         let clientInfo: String
         let userAgent: String
 
-        // Same identity as iloader 2.3.7 / isideload 0.4.5.
-        static let android = ServerClientInfo(
-            clientInfo: "<Pixel 7> <Android;14;UQ1A.240205.002> <com.apple.AuthKit/1 (com.apple.akd/1.0)>",
-            userAgent: "akd/1.0 CFNetwork/808.1.4"
-        )
-
-        var isAndroid: Bool { clientInfo == Self.android.clientInfo }
-
         init(clientInfo: String, userAgent: String) {
             self.clientInfo = clientInfo
             self.userAgent = userAgent
@@ -510,12 +499,6 @@ public final class AnisetteDataManager: @unchecked Sendable {
             case clientInfo = "client_info"
             case userAgent = "user_agent"
         }
-    }
-
-    /// The macOS identities SideStore/AnisetteKit shipped as defaults (and may have saved in settings).
-    private static func isStockMacClientInfo(_ clientInfo: String) -> Bool {
-        clientInfo == Constants.Anisette.defaultClientInfo
-            || clientInfo.contains("<macOS;")
     }
 
     private static func fetchServerClientInfo(_ serverURL: URL) async -> ServerClientInfo? {
